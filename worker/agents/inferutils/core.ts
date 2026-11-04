@@ -20,6 +20,7 @@ import { hasCloudflareConfigured } from '../../services/rate-limit/usageChecker'
 import { getUserConfigurableSettings } from '../../config';
 import { SecurityError, RateLimitExceededError } from 'shared/types/errors';
 import { getAccessTokenFromBlob } from '../../utils/tokenEncryption';
+import { readCloudflareApiToken } from '../../utils/binding-secret';
 import { RateLimitType } from 'worker/services/rate-limit/config';
 import { getMaxToolCallingDepth, MAX_LLM_MESSAGES } from '../constants';
 import { executeToolCallsWithDependencies } from './toolExecution';
@@ -337,15 +338,16 @@ function isValidApiKey(apiKey: string): boolean {
  * When the user supplies a custom gateway, only their own token is used;
  * otherwise the platform's gateway/CF API token is used.
  */
-function resolvePlatformGatewayToken(
+async function resolvePlatformGatewayToken(
     env: Env,
     gatewayOverride?: { baseUrl: string; token: string },
     isUsingCustomGateway?: boolean,
-): string {
+): Promise<string> {
     if (isUsingCustomGateway) {
         return gatewayOverride?.token ?? '';
     }
-    return gatewayOverride?.token ?? (env.CLOUDFLARE_AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN);
+    if (gatewayOverride?.token) return gatewayOverride.token;
+    return readCloudflareApiToken(env);
 }
 
 interface ResolvedApiKey {
@@ -409,14 +411,17 @@ async function getApiKey(
     // Fallback to environment variables (platform-owned secret)
     const providerKeyString = provider.toUpperCase().replaceAll('-', '_');
     const envKey = `${providerKeyString}_API_KEY` as keyof Env;
-    const envApiKey: string = env[envKey] as string;
-    if (isValidApiKey(envApiKey)) {
+    const envApiKey = env[envKey];
+    // A Secrets Store binding is an object. Calling `.trim()` on it throws and
+    // aborts gateway setup before the binding can be resolved to a string.
+    if (typeof envApiKey === 'string' && isValidApiKey(envApiKey)) {
         return { apiKey: envApiKey, isUserCredential: false };
     }
 
-    // Final platform fallback: shared gateway/CF API token.
+    // Final platform fallback: shared gateway/CF API token. The account token
+    // may be a Secrets Store binding, so resolve it to a string first.
     return {
-        apiKey: resolvePlatformGatewayToken(env, runtimeOverrides?.aiGatewayOverride, false),
+        apiKey: await resolvePlatformGatewayToken(env, runtimeOverrides?.aiGatewayOverride, false),
         isUserCredential: false,
     };
 }
@@ -482,7 +487,7 @@ export async function getConfigurationForModel(
     // Use user's gateway if in BYOK mode, otherwise use platform gateway or runtime override
     const baseURL = await buildGatewayUrl(env, providerForcedOverride, gatewayOverride, useUserGateway ? userGateway : null);
 
-    const gatewayToken = resolvePlatformGatewayToken(env, gatewayOverride, isUsingCustomGateway);
+    const gatewayToken = await resolvePlatformGatewayToken(env, gatewayOverride, isUsingCustomGateway);
 
     // AI Gateway Wholesaling checks - only needed when using platform gateway with user's key
     // When using user's own gateway, no wholesaling header needed

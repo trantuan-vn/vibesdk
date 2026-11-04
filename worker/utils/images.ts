@@ -5,6 +5,7 @@
 
 import { ImageAttachment, ProcessedImageAttachment, SupportedImageMimeType } from "worker/types/image-attachment";
 import { getProtocolForHost } from "./urls";
+import { readBindingSecret } from "./binding-secret";
 
 // ===============================
 // Blank screenshot detection
@@ -107,7 +108,7 @@ export async function uploadImageToCloudflareImages(env: Env, image: ImageAttach
 
     const resp = await fetch(url, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${env.CLOUDFLARE_API_TOKEN}` },
+        headers: { 'Authorization': `Bearer ${await readBindingSecret(env.CLOUDFLARE_API_TOKEN)}` },
         body: form,
     });
 

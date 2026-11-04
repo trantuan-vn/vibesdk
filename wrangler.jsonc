@@ -82,32 +82,25 @@
 		"binding": "BROWSER",
 		"remote": true
 	},
-    "dispatch_namespaces": [
-        {
-            "binding": "DISPATCHER",
-            "namespace": "vibesdk-default-namespace",
-            "remote": true
-        }
-    ],
-    "artifacts": [
-        {
-            "binding": "ARTIFACTS",
-            "namespace": "vibesdk-production"
-        }
-    ],
+    // This account does not have Workers for Platforms (API 10121).
+    // "dispatch_namespaces": [
+    //     {
+    //         "binding": "DISPATCHER",
+    //         "namespace": "vibesdk-default-namespace",
+    //         "remote": true
+    //     }
+    // ],
+    // Cloudflare Artifacts is a closed beta. Leave the binding off unless
+    // ENABLE_ARTIFACTS="true"; otherwise deploy fails with code 10015.
 	"containers": [
 		{
 			"class_name": "UserAppSandboxService",
 			"image": "./SandboxDockerfile",
             // "image": "registry.cloudflare.com/vibesdk-production-userappsandboxservice:cfe197fc",
             // Altering max_instances value will have no effect. Please use the MAX_SANDBOX_INSTANCES var instead.
-			"max_instances": 1400,
+			"max_instances": 10,
             // ATTENTION: Altering instance_type value will have no effect. Please use the SANDBOX_INSTANCE_TYPE var instead.
-            "instance_type": {
-                "vcpu": 4,
-                "memory_mib": 8192,
-                "disk_mb": 10240
-            },
+            "instance_type": "standard-3",
             "rollout_step_percentage": 100,
 			"ssh": {
 				"enabled": true
@@ -118,7 +111,7 @@
 		{
 			"binding": "DB",
 			"database_name": "vibesdk-db",
-			"database_id": "c4721a2b-b96a-428a-8b2a-b3d255b307e9",
+			"database_id": "7f86ef3e-c4b3-49b6-a1e9-4876cd17d0b4",
 			"migrations_dir": "migrations"
 		}
 	],
@@ -164,7 +157,7 @@
     "kv_namespaces": [
         {
             "binding": "VibecoderStore",
-            "id": "f066f3c2e4824981b48e8586c04db9c1"
+            "id": "ab6b0ebd4598451ea9bf509e3a2f37b0"
         }
     ],
     // "placement": {
@@ -203,21 +196,28 @@
             "tag": "v6"
         }
 	],
+	"secrets_store_secrets": [
+        {
+            "binding": "CLOUDFLARE_API_TOKEN",
+            "store_id": "8fe9cf5e23574e849953a38dcdafdf8c",
+            "secret_name": "CLOUDFLARE_API_TOKEN"
+        }
+    ],
 	"routes": [
         {
-            "pattern": "build.cloudflare.dev",
+            "pattern": "apps.aiagents-hub.vn",
             "custom_domain": true
         },
         {
-            "pattern": "*build-preview.cloudflare.dev/*",
+            "pattern": "*apps.aiagents-hub.vn/*",
             "custom_domain": false,
-            "zone_id": "db01fac4261b2604aacad8410443a3e2"
+            "zone_name": "aiagents-hub.vn"
         }
     ],
 	"vars": {
         "TEMPLATES_REPOSITORY": "https://github.com/cloudflare/vibesdk-templates",
         "DISPATCH_NAMESPACE": "vibesdk-default-namespace",
-        "CLOUDFLARE_AI_GATEWAY": "vibesdk-gateway",
+        "CLOUDFLARE_AI_GATEWAY": "unitoken",
         // Cloudflare Artifacts namespace for the read-only Repo viewer proxy.
         // Must match the `artifacts` binding namespace above.
         "ARTIFACTS_NAMESPACE": "vibesdk-production",
@@ -235,7 +235,9 @@
             },
             "version": "1.0.0"
         },
-        "CUSTOM_DOMAIN": "",
+        "CUSTOM_DOMAIN": "apps.aiagents-hub.vn",
+        "CLOUDFLARE_ACCOUNT_ID": "e76b7bb989f93985402e1a61e6cd5ff3",
+        "ENABLE_CLOUDFLARE_LIMITS": "true",
         "MAX_SANDBOX_INSTANCES": "10",
         "SANDBOX_INSTANCE_TYPE": "standard-3",
         "DEV_BROWSER_SIDECAR_URL": "http://127.0.0.1:9223",

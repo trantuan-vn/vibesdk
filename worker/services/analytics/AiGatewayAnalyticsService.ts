@@ -4,6 +4,7 @@
  */
 
 import { createLogger, StructuredLogger } from '../../logger';
+import { readBindingSecret, readCloudflareApiToken } from '../../utils/binding-secret';
 import {
   AnalyticsConfig,
   AnalyticsData,
@@ -21,22 +22,32 @@ import {
 export class AiGatewayAnalyticsService {
   private config: AnalyticsConfig;
   private logger: StructuredLogger;
+  private ready: Promise<void>;
 
   constructor(env: Env) {
     this.logger = createLogger('AiGatewayAnalyticsService');
-    this.config = this.initializeConfig(env);
-    this.logger.info('AiGatewayAnalyticsService initialized', {
-      endpoint: this.config.graphqlEndpoint,
-      isStaging: this.config.isStaging,
-      accountId: this.config.accountId,
-      gateway: this.config.gateway
+    this.config = {
+      accountId: '',
+      gateway: '',
+      graphqlEndpoint: 'https://api.cloudflare.com/client/v4/graphql',
+      apiToken: '',
+      isStaging: false
+    };
+    this.ready = this.initializeConfig(env).then((config) => {
+      this.config = config;
+      this.logger.info('AiGatewayAnalyticsService initialized', {
+        endpoint: this.config.graphqlEndpoint,
+        isStaging: this.config.isStaging,
+        accountId: this.config.accountId,
+        gateway: this.config.gateway
+      });
     });
   }
 
   /**
    * Initialize configuration from environment variables
    */
-  private initializeConfig(env: Env): AnalyticsConfig {
+  private async initializeConfig(env: Env): Promise<AnalyticsConfig> {
     const config: AnalyticsConfig = {
       accountId: '',
       gateway: '',
@@ -56,9 +67,9 @@ export class AiGatewayAnalyticsService {
         
         if (isStaging) {
           config.graphqlEndpoint = 'https://api.staging.cloudflare.com/client/v4/graphql';
-          config.apiToken = env.CLOUDFLARE_AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN || '';
+          config.apiToken = await readCloudflareApiToken(env);
         } else {
-          config.apiToken = env.CLOUDFLARE_API_TOKEN || '';
+          config.apiToken = await readBindingSecret(env.CLOUDFLARE_API_TOKEN);
         }
       } catch (error) {
         this.logger.warn('Failed to parse CLOUDFLARE_AI_GATEWAY_URL, falling back to direct env vars', { error });
@@ -70,7 +81,7 @@ export class AiGatewayAnalyticsService {
     if (!config.accountId || !config.gateway || !config.apiToken) {
       config.accountId = env.CLOUDFLARE_ACCOUNT_ID || config.accountId;
       config.gateway = env.CLOUDFLARE_AI_GATEWAY || config.gateway;
-      config.apiToken = env.CLOUDFLARE_API_TOKEN || config.apiToken;
+      config.apiToken = (await readBindingSecret(env.CLOUDFLARE_API_TOKEN)) || config.apiToken;
     }
 
     // Validate required configuration
@@ -345,6 +356,7 @@ export class AiGatewayAnalyticsService {
    * @param days - Number of days to query (optional, defaults to 30 days due to API limits)
    */
   async getUserAnalytics(userId: string, days?: number): Promise<UserAnalyticsData> {
+    await this.ready;
     this.logger.info('Getting user analytics', { userId, days: days || '30 days (default)' });
     
     const timeRange = this.getTimeRange(days);
@@ -364,6 +376,7 @@ export class AiGatewayAnalyticsService {
    * @param days - Number of days to query (optional, defaults to 30 days due to API limits)
    */
   async getChatAnalytics(chatId: string, days?: number): Promise<ChatAnalyticsData> {
+    await this.ready;
     this.logger.info('Getting chat analytics', { chatId, days: days || '30 days (default)' });
     
     const timeRange = this.getTimeRange(days);
@@ -382,6 +395,7 @@ export class AiGatewayAnalyticsService {
    * @param days - Number of days to query (optional, defaults to 30 days due to API limits)
    */
   async getTotalAnalytics(days?: number): Promise<AnalyticsData> {
+    await this.ready;
     this.logger.info('Getting total analytics', { days: days || '30 days (default)' });
     
     const timeRange = this.getTimeRange(days);

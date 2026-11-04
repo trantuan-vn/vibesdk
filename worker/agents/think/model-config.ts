@@ -1,11 +1,14 @@
 import { ModelSize, type AIModelConfig } from '../inferutils/config.types';
 
-export const THINK_MODEL_ID = 'google-ai-studio/gemini-3.6-flash';
+// Compat id: provider/model. The account's only AI Gateway provider key is
+// DeepSeek (Secrets Store name `unitoken_deepseek_default`), so Gemini requests
+// fail before the model runs.
+export const THINK_MODEL_ID = 'deepseek/deepseek-chat';
 
 export const THINK_MODEL_CONFIG: AIModelConfig = {
-	name: 'Gemini 3.6 Flash',
+	name: 'DeepSeek Chat',
 	size: ModelSize.REGULAR,
-	provider: 'google-ai-studio',
-	creditCost: 2,
-	contextSize: 1_048_576,
+	provider: 'deepseek',
+	creditCost: 1,
+	contextSize: 128_000,
 };

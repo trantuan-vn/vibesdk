@@ -86,6 +86,48 @@ describe('getConfigurationForModel - gateway/key coupling', () => {
 		expect(baseURL.startsWith(ATTACKER_URL)).toBe(true);
 	});
 
+	it('reads a Secrets Store binding when no provider key is set', async () => {
+		const token = 'cf-secret-store-token-123456';
+		const { apiKey } = await getConfigurationForModel(
+			MODEL_CONFIG,
+			makeEnv({
+				OPENAI_API_KEY: '',
+				CLOUDFLARE_API_TOKEN: { get: async () => token },
+			}),
+			'user-1',
+		);
+
+		expect(apiKey).toBe(token);
+	});
+
+	it('reads a Secrets Store RPC stub whose get method is hidden from the in operator', async () => {
+		const token = 'cf-rpc-secret-token-123456';
+		const binding = new Proxy(
+			{},
+			{
+				get(_target, prop) {
+					if (prop === 'get') return () => Promise.resolve(token);
+					return undefined;
+				},
+				has() {
+					return false;
+				},
+			},
+		);
+		expect('get' in binding).toBe(false);
+
+		const { apiKey } = await getConfigurationForModel(
+			MODEL_CONFIG,
+			makeEnv({
+				OPENAI_API_KEY: '',
+				CLOUDFLARE_API_TOKEN: binding,
+			}),
+			'user-1',
+		);
+
+		expect(apiKey).toBe(token);
+	});
+
 	it('uses the platform key and gateway when no override is supplied', async () => {
 		const { apiKey, baseURL } = await getConfigurationForModel(
 			MODEL_CONFIG,

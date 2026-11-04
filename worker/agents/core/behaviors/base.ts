@@ -42,6 +42,7 @@ import type { DeepDebuggerInputs } from '../../operations/DeepDebugger';
 import { generatePortToken } from 'worker/utils/cryptoUtils';
 import { getProtocolForHost, resolvePreviewHost } from 'worker/utils/urls';
 import { isDev } from 'worker/utils/envs';
+import { readBindingSecret } from 'worker/utils/binding-secret';
 import { InMemoryAnalyzer } from '../../../services/static-analysis';
 import { getBrowserCaptureClient } from '../../../services/browser-capture/factory';
 import type { BrowserConsoleCaptureResult } from '../../../services/browser-capture/types';
@@ -1889,7 +1890,7 @@ export abstract class BaseCodingBehavior<TState extends BaseProjectState>
         const response = await fetch(apiUrl, {
             method: 'POST',
             headers: {
-                'Authorization': `Bearer ${this.env.CLOUDFLARE_API_TOKEN}`,
+                'Authorization': `Bearer ${await readBindingSecret(this.env.CLOUDFLARE_API_TOKEN)}`,
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({

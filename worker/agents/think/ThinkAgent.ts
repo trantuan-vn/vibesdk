@@ -26,6 +26,7 @@ import { RateLimitService } from '../../services/rate-limit/rateLimits';
 import { hasCloudflareConfigured } from '../../services/rate-limit/usageChecker';
 import type { RateLimitSettings } from '../../services/rate-limit/config';
 import { THINK_MODEL_CONFIG } from './model-config';
+import { readCloudflareApiToken } from '../../utils/binding-secret';
 
 /**
  * Per-instance configuration pushed into a {@link ThinkAgent} by the host
@@ -238,6 +239,21 @@ export class ThinkAgent extends Think<Env> {
 			let body = init?.body;
 			if (typeof body === 'string') body = this.injectThoughtSignatures(body);
 			const res = await fetch(input as RequestInfo, { ...(init ?? {}), headers, body });
+			if (!res.ok) {
+				const raw = await res.text();
+				const detail = raw
+					.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+					.replace(/[A-Za-z0-9_-]{20,}/g, '[redacted]')
+					.slice(0, 240);
+				console.error('Think gateway request failed', {
+					status: res.status,
+					model: model.modelName,
+					detail,
+				});
+				throw new Error(
+					`AI Gateway returned ${res.status} for ${model.modelName}${detail ? `: ${detail}` : ''}`,
+				);
+			}
 			if (!res.body) return res;
 			const outHeaders = new Headers(res.headers);
 			// Body length/encoding change after transforming the stream.
@@ -248,9 +264,15 @@ export class ThinkAgent extends Think<Env> {
 				{ status: res.status, statusText: res.statusText, headers: outHeaders },
 			);
 		};
+		const apiKey = model.apiKey;
+		if (typeof apiKey !== 'string' || apiKey.length === 0 || apiKey.includes('[object Object]')) {
+			throw new Error(
+				'ThinkAgent API key is not a string. CLOUDFLARE_API_TOKEN was not read from Secrets Store before this turn.',
+			);
+		}
 		const provider = createOpenAI({
 			baseURL: model.baseURL,
-			apiKey: model.apiKey,
+			apiKey,
 			headers: model.headers,
 			fetch: gatewayFetch,
 		});
@@ -383,6 +405,39 @@ export class ThinkAgent extends Think<Env> {
 	}
 
 	/**
+	 * A Secrets Store binding cannot be persisted (it serializes to `{}`).
+	 * `loadApiKey` then throws "OpenAI API key must be a string" on every later
+	 * turn. Keep only a real string, otherwise read the binding in this DO.
+	 */
+	private async resolveModelApiKey(apiKey: unknown): Promise<string> {
+		if (typeof apiKey === 'string' && apiKey.length > 0 && !apiKey.includes('[object Object]')) {
+			return apiKey;
+		}
+		return readCloudflareApiToken(this.env);
+	}
+
+	async repairModelCredentials(): Promise<void> {
+		const cfg = this.getConfig<ThinkAgentConfig>();
+		if (!cfg) return;
+		const apiKey = await this.resolveModelApiKey(cfg.model.apiKey);
+		if (!apiKey) {
+			throw new Error(
+				'CLOUDFLARE_API_TOKEN did not resolve to a string. The persisted model key is still unusable.',
+			);
+		}
+		const headers = { ...(cfg.model.headers ?? {}) };
+		const gatewayHeader = headers['cf-aig-authorization'];
+		if (!gatewayHeader || gatewayHeader.includes('[object Object]')) {
+			headers['cf-aig-authorization'] = `Bearer ${apiKey}`;
+		}
+		if (apiKey === cfg.model.apiKey && headers['cf-aig-authorization'] === gatewayHeader) return;
+		this.configure<ThinkAgentConfig>({
+			...cfg,
+			model: { ...cfg.model, apiKey, headers },
+		});
+	}
+
+	/**
 	 * RPC entrypoint used by `ThinkCodingBehavior` to push model/space/prompt
 	 * configuration. Called once per app, when the host behavior initializes a
 	 * fresh agent (each app maps to its own ThinkAgent DO — and therefore its
@@ -398,7 +453,14 @@ export class ThinkAgent extends Think<Env> {
 	 * any stale cached value.
 	 */
 	async configureVibe(config: ThinkAgentConfig): Promise<void> {
-		this.configure<ThinkAgentConfig>(config);
+		const apiKey = await this.resolveModelApiKey(config.model.apiKey);
+		this.configure<ThinkAgentConfig>({
+			...config,
+			model: {
+				...config.model,
+				apiKey: apiKey || (typeof config.model.apiKey === 'string' ? config.model.apiKey : ''),
+			},
+		});
 		try {
 			await this.session?.refreshSystemPrompt();
 		} catch {

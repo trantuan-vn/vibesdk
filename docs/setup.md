@@ -167,13 +167,15 @@ Grant the client these **scopes** (Cloudflare uses dotted identifiers, not OIDC
 `email`/`profile`):
 
 ```
-openid user-details.read ai.read ai.write aig.read aig.run aig.write offline_access
+openid user-details.read ai.read ai.write aig.read aig.run aig.write workers-scripts.edit offline_access
 ```
 
 The scopes and the Cloudflare OAuth endpoint URLs are hardcoded in the worker
 (`worker/services/oauth/cloudflare-connect.ts`) and are not configurable — just make
 sure the OAuth client is authorized for all of these scopes, or the authorization
-request fails with `invalid_scope`.
+request fails with `invalid_scope`. `workers-scripts.edit` is the dashboard permission
+labeled Workers Editor (Workers → Edit). The legacy id `workers-scripts.write` is
+rejected.
 
 **2. Set the environment variables**
 

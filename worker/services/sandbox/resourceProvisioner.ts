@@ -1,5 +1,6 @@
 import { StructuredLogger } from '../../logger';
 import { env } from 'cloudflare:workers';
+import { readBindingSecret } from '../../utils/binding-secret';
 
 export interface ResourceProvisionResult {
     success: boolean;
@@ -35,17 +36,15 @@ export interface CloudflareD1DatabaseResponse {
 export class ResourceProvisioner {
     private logger: StructuredLogger;
     private accountId: string;
-    private apiToken: string;
+    private apiToken = '';
 
     constructor(logger: StructuredLogger) {
         this.logger = logger;
         this.accountId = env.CLOUDFLARE_ACCOUNT_ID;
-        this.apiToken = env.CLOUDFLARE_API_TOKEN;
         
-        if (!this.accountId || !this.apiToken) {
+        if (!this.accountId) {
             this.logger.error('Missing required environment variables for resource provisioning', {
-                hasAccountId: !!this.accountId,
-                hasApiToken: !!this.apiToken
+                hasAccountId: false,
             });
             throw new Error('CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN must be set for resource provisioning');
         }
@@ -55,9 +54,14 @@ export class ResourceProvisioner {
         });
     }
 
-    private getCloudflareHeaders(): HeadersInit {
+    private async getCloudflareHeaders(): Promise<HeadersInit> {
+        const apiToken = this.apiToken || await readBindingSecret(env.CLOUDFLARE_API_TOKEN);
+        this.apiToken = apiToken;
+        if (!apiToken) {
+            throw new Error('CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN must be set for resource provisioning');
+        }
         return {
-            'Authorization': `Bearer ${this.apiToken}`,
+            'Authorization': `Bearer ${apiToken}`,
             'Content-Type': 'application/json'
         };
     }
@@ -71,7 +75,7 @@ export class ResourceProvisioner {
             
             const response = await fetch(url, {
                 method: 'POST',
-                headers: this.getCloudflareHeaders(),
+                headers: await this.getCloudflareHeaders(),
                 body: JSON.stringify({
                     title: namespaceName
                 })
@@ -123,7 +127,7 @@ export class ResourceProvisioner {
             
             const response = await fetch(url, {
                 method: 'POST',
-                headers: this.getCloudflareHeaders(),
+                headers: await this.getCloudflareHeaders(),
                 body: JSON.stringify({
                     name: databaseName
                 })

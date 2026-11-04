@@ -20,7 +20,9 @@ const CLOUDFLARE_GATEWAY_SCOPES = [
 	'aig.read',
 	'aig.run',
 	'aig.write',
-	'workers-scripts.write',
+	// Dashboard label is "Workers Editor" / Workers → Edit. The legacy id
+	// `workers-scripts.write` is no longer grantable and fails authorize with invalid_scope.
+	'workers-scripts.edit',
 	'offline_access',
 ] as const;
 

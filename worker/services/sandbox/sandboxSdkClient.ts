@@ -1,4 +1,5 @@
 import { getSandbox, Sandbox, parseSSEStream, LogEvent, ExecResult } from '@cloudflare/sandbox';
+import { readBindingSecret } from '../../utils/binding-secret';
 
 import {
     BootstrapResponse,
@@ -1744,7 +1745,7 @@ export class SandboxSdkClient extends BaseSandboxService {
             
             // Get credentials from environment (secure - no exposure to external processes)
             const accountId = env.CLOUDFLARE_ACCOUNT_ID;
-            const apiToken = env.CLOUDFLARE_API_TOKEN;
+            const apiToken = await readBindingSecret(env.CLOUDFLARE_API_TOKEN);
             
             if (!accountId || !apiToken) {
                 throw new Error('CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN must be set in environment');

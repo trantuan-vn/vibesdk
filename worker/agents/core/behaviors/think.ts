@@ -25,6 +25,7 @@ import { isDev } from 'worker/utils/envs';
 import { signSpacePreviewToken } from 'worker/utils/spacePreviewToken';
 import { AppService } from 'worker/database/services/AppService';
 import { getConfigurationForModel } from '../../inferutils/core';
+import { readBindingSecret, readCloudflareApiToken } from '../../../utils/binding-secret';
 import type { ThinkAgentConfig } from '../../think/ThinkAgent';
 import { withDurableObjectResetRetry } from '../../think/space-workspace-ops';
 import { THINK_MODEL_CONFIG, THINK_MODEL_ID } from '../../think/model-config';
@@ -40,6 +41,7 @@ import type { CloudflareDeploymentErrorCode } from '../../../api/websocketTypes'
  */
 type ThinkAgentStub = {
 	configureVibe: (config: ThinkAgentConfig) => Promise<void>;
+	repairModelCredentials: () => Promise<void>;
 	chat: (userMessage: string, callback: RpcTarget) => Promise<void>;
 	getMessages: () => Promise<UIMessage[]>;
 	clearMessages: () => Promise<void>;
@@ -243,11 +245,7 @@ export class ThinkCodingBehavior
 		// gateway's stored keys (BYOK) — so authenticate with the gateway token
 		// and let `ThinkAgent.getModel()` drop the provider `Authorization`
 		// header (see `useStoredKeys`).
-		const tokenEnv = this.env as unknown as {
-			CLOUDFLARE_AI_GATEWAY_TOKEN?: string;
-			CLOUDFLARE_API_TOKEN?: string;
-		};
-		const gatewayToken = tokenEnv.CLOUDFLARE_AI_GATEWAY_TOKEN || tokenEnv.CLOUDFLARE_API_TOKEN;
+		const gatewayToken = await readCloudflareApiToken(this.env);
 		const usesStoredKeys = !conf.defaultHeaders?.['cf-aig-authorization'];
 		const headers: Record<string, string> = { ...(conf.defaultHeaders ?? {}) };
 		if (gatewayToken && !headers['cf-aig-authorization']) {
@@ -524,6 +522,11 @@ export class ThinkCodingBehavior
 
 		const stub = await this.getThinkStub();
 		try {
+			// Persisted Think config keeps the previous model and gateway URL.
+			// Push the current coordinates before every turn so an existing
+			// session picks up a provider-key or gateway change.
+			await this.configureThinkAgent();
+			await stub.repairModelCredentials();
 			await stub.chat(text, forwarder);
 		} finally {
 			this.broadcast(WebSocketMessageResponses.USAGE_UPDATED, {
@@ -998,7 +1001,7 @@ export class ThinkCodingBehavior
 		});
 		try {
 			const accountId = this.env.CLOUDFLARE_ACCOUNT_ID;
-			const apiToken = this.env.CLOUDFLARE_API_TOKEN;
+			const apiToken = await readBindingSecret(this.env.CLOUDFLARE_API_TOKEN);
 			if (!accountId || !apiToken) {
 				throw new Error('CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN must be set in environment');
 			}
