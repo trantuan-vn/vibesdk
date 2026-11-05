@@ -47,6 +47,10 @@ describe('sanitizeWorkerName', () => {
 		expect(sanitizeWorkerName('!@#$')).toBe('vibe-app');
 		expect(sanitizeWorkerName('A'.repeat(100))).toHaveLength(63);
 	});
+
+	it('keeps Vietnamese titles readable', () => {
+		expect(sanitizeWorkerName('Ví Cá Nhân — Quản lý tài chính')).toBe('vi-ca-nhan-quan-ly-tai-chinh');
+	});
 });
 
 describe('deployThinkBundleToPlatform', () => {
@@ -125,5 +129,18 @@ describe('deployThinkBundleToUserAccount', () => {
 		expect(deployWithAssets.mock.calls[0][7]).toBeUndefined();
 		expect(enableWorkersDev).toHaveBeenCalledWith('my-app');
 		expect(result.deploymentUrl).toBe('https://my-app.user-sub.workers.dev');
+	});
+
+	it('omits the AI binding when platform fallback disables it', async () => {
+		await deployThinkBundleToUserAccount({
+			accountId: 'platform-account',
+			accessToken: 'platform-token',
+			appName: 'My App',
+			bundle: makeBundle(),
+			enableAI: false,
+		});
+
+		expect(deployWithAssets.mock.calls[0][5]).not.toContainEqual({ name: 'AI', type: 'ai' });
+		expect(deployWithAssets.mock.calls[0][7]).toBeUndefined();
 	});
 });

@@ -4,7 +4,7 @@
  */
 
 import { createLogger, StructuredLogger } from '../../logger';
-import { readBindingSecret, readCloudflareApiToken } from '../../utils/binding-secret';
+import { readAccountApiToken, readCloudflareApiToken } from '../../utils/binding-secret';
 import {
   AnalyticsConfig,
   AnalyticsData,
@@ -69,7 +69,7 @@ export class AiGatewayAnalyticsService {
           config.graphqlEndpoint = 'https://api.staging.cloudflare.com/client/v4/graphql';
           config.apiToken = await readCloudflareApiToken(env);
         } else {
-          config.apiToken = await readBindingSecret(env.CLOUDFLARE_API_TOKEN);
+          config.apiToken = await readAccountApiToken(env);
         }
       } catch (error) {
         this.logger.warn('Failed to parse CLOUDFLARE_AI_GATEWAY_URL, falling back to direct env vars', { error });
@@ -81,7 +81,7 @@ export class AiGatewayAnalyticsService {
     if (!config.accountId || !config.gateway || !config.apiToken) {
       config.accountId = env.CLOUDFLARE_ACCOUNT_ID || config.accountId;
       config.gateway = env.CLOUDFLARE_AI_GATEWAY || config.gateway;
-      config.apiToken = (await readBindingSecret(env.CLOUDFLARE_API_TOKEN)) || config.apiToken;
+      config.apiToken = (await readAccountApiToken(env)) || config.apiToken;
     }
 
     // Validate required configuration

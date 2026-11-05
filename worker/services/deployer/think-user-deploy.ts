@@ -32,10 +32,19 @@ function normalizeModule(value: string | Record<string, unknown>): string {
 	throw new Error('The generated Worker contains a non-text module that cannot be published');
 }
 
+/** Strip diacritics so "Ví Cá Nhân" becomes "vi ca nhan", not "v c nh n". */
+function foldToAscii(value: string): string {
+	return value
+		.replace(/đ/g, 'd')
+		.replace(/Đ/g, 'd')
+		.normalize('NFD')
+		.replace(/\p{M}/gu, '');
+}
+
 export function sanitizeWorkerName(value: string): string {
-	const normalized = value
+	const normalized = foldToAscii(value)
 		.toLowerCase()
-		.replace(/[^a-z0-9-]+/g, '-')
+		.replace(/[^a-z0-9]+/g, '-')
 		.replace(/^-+|-+$/g, '')
 		.slice(0, 63);
 	return normalized || 'vibe-app';
@@ -182,8 +191,10 @@ export async function deployThinkBundleToUserAccount(input: {
 	accessToken: string;
 	appName: string;
 	bundle: BranchDeploymentBundle;
+	/** User-account deploys attach Workers AI. Platform fallbacks pass false unless explicitly enabled. */
+	enableAI?: boolean;
 }): Promise<ThinkUserDeploymentResult> {
-	const artifacts = await buildThinkBundleArtifacts(input.bundle, input.appName, true);
+	const artifacts = await buildThinkBundleArtifacts(input.bundle, input.appName, input.enableAI !== false);
 	const deployer = new WorkerDeployer(input.accountId, input.accessToken);
 	await deployArtifacts(deployer, artifacts, undefined);
 

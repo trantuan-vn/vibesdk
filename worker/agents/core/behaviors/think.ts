@@ -25,7 +25,7 @@ import { isDev } from 'worker/utils/envs';
 import { signSpacePreviewToken } from 'worker/utils/spacePreviewToken';
 import { AppService } from 'worker/database/services/AppService';
 import { getConfigurationForModel } from '../../inferutils/core';
-import { readBindingSecret, readCloudflareApiToken } from '../../../utils/binding-secret';
+import { readAccountApiToken, readCloudflareApiToken } from '../../../utils/binding-secret';
 import type { ThinkAgentConfig } from '../../think/ThinkAgent';
 import { createToolInputScan, pushToolInput, type ToolInputScan } from '../../think/partial-tool-input';
 import { isAgentDisconnectError, isPostDeployRestartError, withDurableObjectResetRetry } from '../../think/space-workspace-ops';
@@ -33,6 +33,7 @@ import { THINK_MODEL_CONFIG, THINK_MODEL_ID } from '../../think/model-config';
 import type { BranchDeploymentBundle } from '@space-do/space';
 import { CloudflareAccountService } from '../../../services/cloudflare/CloudflareAccountService';
 import { deployThinkBundleToPlatform, deployThinkBundleToUserAccount } from '../../../services/deployer/think-user-deploy';
+import { isDispatcherAvailable } from '../../../utils/dispatcherUtils';
 import { resolveCloudflareAccessToken } from '../../../services/rate-limit/usageChecker';
 import type { CloudflareDeploymentErrorCode } from '../../../api/websocketTypes';
 
@@ -1231,8 +1232,10 @@ export class ThinkCodingBehavior
 	}
 
 	/**
-	 * Default think deploy when `ENABLE_USER_ACCOUNT_DEPLOY` is off: publish the
-	 * SpaceDO bundle to the platform's dispatch namespace with platform creds.
+	 * Default think deploy when `ENABLE_USER_ACCOUNT_DEPLOY` is off.
+	 * Accounts with Workers for Platforms publish into the dispatch namespace.
+	 * Accounts without it (no `DISPATCHER` binding) publish a normal Worker on
+	 * workers.dev — the dispatch assets API rejects those tokens with 403/10000.
 	 */
 	private async deployThinkAppToPlatform(): Promise<{ deploymentUrl?: string; workersUrl?: string } | null> {
 		const instanceId = this.getAgentId();
@@ -1242,14 +1245,9 @@ export class ThinkCodingBehavior
 		});
 		try {
 			const accountId = this.env.CLOUDFLARE_ACCOUNT_ID;
-			const apiToken = await readBindingSecret(this.env.CLOUDFLARE_API_TOKEN);
+			const apiToken = await readAccountApiToken(this.env);
 			if (!accountId || !apiToken) {
 				throw new Error('CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN must be set in environment');
-			}
-			const dispatchNamespace = (this.env as unknown as { DISPATCH_NAMESPACE?: string })
-				.DISPATCH_NAMESPACE;
-			if (!dispatchNamespace) {
-				throw new Error('DISPATCH_NAMESPACE not found in environment variables, cannot deploy without dispatch namespace');
 			}
 
 			const branch = this.state.currentBranch || 'main';
@@ -1259,15 +1257,23 @@ export class ThinkCodingBehavior
 				this.logger.debug('No new workspace changes to commit before publishing', error);
 			}
 			const bundle = await this.callSpace((space) => space.getDeploymentBundle(branch));
-			const result = await deployThinkBundleToPlatform({
-				accountId,
-				apiToken,
-				dispatchNamespace,
-				previewDomain: getPreviewDomain(this.env),
-				appName: this.state.blueprint.title || this.state.projectName || `vibe-${instanceId}`,
-				bundle,
-				enableAI: this.env.ENABLE_PLATFORM_AI_BINDING === 'true',
-			});
+			const appName = this.state.blueprint.title || this.state.projectName || `vibe-${instanceId}`;
+			const enableAI = this.env.ENABLE_PLATFORM_AI_BINDING === 'true';
+			const result = isDispatcherAvailable(this.env)
+				? await this.deployThinkBundleViaDispatch({
+					accountId,
+					apiToken,
+					appName,
+					bundle,
+					enableAI,
+				})
+				: await deployThinkBundleToUserAccount({
+					accountId,
+					accessToken: apiToken,
+					appName,
+					bundle,
+					enableAI,
+				});
 			await new AppService(this.env).updateDeploymentId(instanceId, result.deploymentId);
 			this.setState({ ...this.state, cloudflareDeploymentUrl: result.deploymentUrl });
 			this.broadcast(WebSocketMessageResponses.CLOUDFLARE_DEPLOYMENT_COMPLETED, {
@@ -1287,6 +1293,28 @@ export class ThinkCodingBehavior
 			});
 			return null;
 		}
+	}
+
+	private async deployThinkBundleViaDispatch(input: {
+		accountId: string;
+		apiToken: string;
+		appName: string;
+		bundle: BranchDeploymentBundle;
+		enableAI: boolean;
+	}) {
+		const dispatchNamespace = (this.env as unknown as { DISPATCH_NAMESPACE?: string }).DISPATCH_NAMESPACE;
+		if (!dispatchNamespace) {
+			throw new Error('DISPATCH_NAMESPACE not found in environment variables, cannot deploy without dispatch namespace');
+		}
+		return deployThinkBundleToPlatform({
+			accountId: input.accountId,
+			apiToken: input.apiToken,
+			dispatchNamespace,
+			previewDomain: getPreviewDomain(this.env),
+			appName: input.appName,
+			bundle: input.bundle,
+			enableAI: input.enableAI,
+		});
 	}
 }
 

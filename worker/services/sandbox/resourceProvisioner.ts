@@ -1,6 +1,6 @@
 import { StructuredLogger } from '../../logger';
 import { env } from 'cloudflare:workers';
-import { readBindingSecret } from '../../utils/binding-secret';
+import { readAccountApiToken } from '../../utils/binding-secret';
 
 export interface ResourceProvisionResult {
     success: boolean;
@@ -55,7 +55,7 @@ export class ResourceProvisioner {
     }
 
     private async getCloudflareHeaders(): Promise<HeadersInit> {
-        const apiToken = this.apiToken || await readBindingSecret(env.CLOUDFLARE_API_TOKEN);
+        const apiToken = this.apiToken || await readAccountApiToken(env);
         this.apiToken = apiToken;
         if (!apiToken) {
             throw new Error('CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN must be set for resource provisioning');

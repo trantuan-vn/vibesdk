@@ -24,12 +24,27 @@ export async function readBindingSecret(value: unknown): Promise<string> {
 	}
 }
 
+/**
+ * Account API token used for Workers, Images, and other Cloudflare REST calls.
+ * Production binds this as `CLOUDFLARE_USAGE_API_TOKEN` (Secrets Store secret
+ * `CLOUDFLARE_API_TOKEN`). Local `.dev.vars` still uses `CLOUDFLARE_API_TOKEN`.
+ */
+export async function readAccountApiToken(env: {
+	CLOUDFLARE_USAGE_API_TOKEN?: unknown;
+	CLOUDFLARE_API_TOKEN?: unknown;
+}): Promise<string> {
+	const usageToken = await readBindingSecret(env.CLOUDFLARE_USAGE_API_TOKEN);
+	if (usageToken) return usageToken;
+	return readBindingSecret(env.CLOUDFLARE_API_TOKEN);
+}
+
 /** Platform Cloudflare token: gateway token first, then the account API token. */
 export async function readCloudflareApiToken(env: {
 	CLOUDFLARE_AI_GATEWAY_TOKEN?: unknown;
+	CLOUDFLARE_USAGE_API_TOKEN?: unknown;
 	CLOUDFLARE_API_TOKEN?: unknown;
 }): Promise<string> {
 	const gatewayToken = await readBindingSecret(env.CLOUDFLARE_AI_GATEWAY_TOKEN);
 	if (gatewayToken) return gatewayToken;
-	return readBindingSecret(env.CLOUDFLARE_API_TOKEN);
+	return readAccountApiToken(env);
 }

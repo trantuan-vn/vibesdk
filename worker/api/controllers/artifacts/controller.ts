@@ -27,7 +27,7 @@ import { createLogger } from '../../../logger';
 import { RouteContext } from '../../types/route-context';
 import { ApiResponse, ControllerResponse } from '../types';
 import { AppService } from '../../../database/services/AppService';
-import { readBindingSecret } from '../../../utils/binding-secret';
+import { readAccountApiToken, readBindingSecret } from '../../../utils/binding-secret';
 import type { ListAppBranchesResponse } from './types';
 
 /** Mount point for the read-only Artifacts proxy. */
@@ -62,7 +62,7 @@ export class ArtifactsController extends BaseController {
 		// account token. Both must carry Cloudflare Artifacts read permission.
 		const apiToken =
 			(await readBindingSecret((env as { ARTIFACTS_API_TOKEN?: unknown }).ARTIFACTS_API_TOKEN)) ||
-			(await readBindingSecret(env.CLOUDFLARE_API_TOKEN));
+			(await readAccountApiToken(env));
 		if (!accountId || !namespace || !apiToken) {
 			this.logger.warn('Artifacts proxy is not configured', {
 				hasAccountId: !!accountId,

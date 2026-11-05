@@ -12,6 +12,9 @@ declare namespace Cloudflare {
 		USE_CLOUDFLARE_IMAGES?: string;
 		USE_TUNNEL_FOR_PREVIEW?: string;
 
+		// Secrets Store binding. The stored secret is still named CLOUDFLARE_API_TOKEN.
+		CLOUDFLARE_USAGE_API_TOKEN?: string;
+
 		// Secret bindings are omitted by `wrangler types` when absent from .dev.vars.
 		ANTHROPIC_API_KEY: string;
 		CF_ACCESS_ID: string;

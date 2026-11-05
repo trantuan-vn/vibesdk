@@ -198,7 +198,7 @@
 	],
 	"secrets_store_secrets": [
         {
-            "binding": "CLOUDFLARE_API_TOKEN",
+            "binding": "CLOUDFLARE_USAGE_API_TOKEN",
             "store_id": "8fe9cf5e23574e849953a38dcdafdf8c",
             "secret_name": "CLOUDFLARE_API_TOKEN"
         }
