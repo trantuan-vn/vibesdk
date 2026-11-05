@@ -365,6 +365,17 @@ export function appendToolEvent(
 
     return updateAssistant(messages, idx, (parts) => {
         if (tool.status === 'start') {
+            if (tool.id) {
+                for (let i = parts.length - 1; i >= 0; i--) {
+                    const part = parts[i];
+                    if (part.type === 'tool' && part.event.id === tool.id && part.event.status === 'start') {
+                        const existing = part.event;
+                        const event = mkEvent(existing);
+                        if (tool.args) event.args = { ...existing.args, ...tool.args };
+                        return parts.map((p, partIndex) => (partIndex === i ? { type: 'tool' as const, event } : p));
+                    }
+                }
+            }
             return [...parts, { type: 'tool', event: mkEvent() }];
         }
         // Locate the matching tool part to finalize.
@@ -382,4 +393,24 @@ export function appendToolEvent(
         }
         return [...parts, { type: 'tool', event: mkEvent() }];
     });
+}
+
+/** Mark every in-flight tool row as failed so a dead stream cannot spin forever. */
+export function settleRunningTools(messages: ChatMessage[], reason: string): ChatMessage[] {
+    let changed = false;
+    const next = messages.map((message) => {
+        if (message.role !== 'assistant' || !message.parts) return message;
+        let messageChanged = false;
+        const parts = message.parts.map((part) => {
+            if (part.type !== 'tool' || part.event.status !== 'start') return part;
+            messageChanged = true;
+            changed = true;
+            return {
+                type: 'tool' as const,
+                event: { ...part.event, status: 'error' as const, result: part.event.result ?? reason },
+            };
+        });
+        return messageChanged ? { ...message, parts } : message;
+    });
+    return changed ? next : messages;
 }

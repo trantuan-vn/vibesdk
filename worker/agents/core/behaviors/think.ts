@@ -27,7 +27,8 @@ import { AppService } from 'worker/database/services/AppService';
 import { getConfigurationForModel } from '../../inferutils/core';
 import { readBindingSecret, readCloudflareApiToken } from '../../../utils/binding-secret';
 import type { ThinkAgentConfig } from '../../think/ThinkAgent';
-import { withDurableObjectResetRetry } from '../../think/space-workspace-ops';
+import { createToolInputScan, pushToolInput, type ToolInputScan } from '../../think/partial-tool-input';
+import { isAgentDisconnectError, isPostDeployRestartError, withDurableObjectResetRetry } from '../../think/space-workspace-ops';
 import { THINK_MODEL_CONFIG, THINK_MODEL_ID } from '../../think/model-config';
 import type { BranchDeploymentBundle } from '@space-do/space';
 import { CloudflareAccountService } from '../../../services/cloudflare/CloudflareAccountService';
@@ -50,6 +51,7 @@ type ThinkAgentStub = {
 /** SpaceDO RPC surface this behavior drives (see `space/src/space/durable-object.ts`). */
 type SpaceRpcStub = {
 	writeFile: (path: string, content: string) => Promise<unknown>;
+	mkdir: (path: string, opts?: { recursive?: boolean }) => Promise<void>;
 	readFile: (path: string, opts?: { offset?: number; limit?: number }) => Promise<string>;
 	gitCommit: (
 		msg: string,
@@ -70,11 +72,30 @@ type ThinkChunk =
 	| { type: 'reasoning-delta'; id: string; delta: string }
 	| { type: 'reasoning-end'; id: string }
 	| { type: 'tool-input-start'; toolCallId: string; toolName: string }
+	| { type: 'tool-input-delta'; toolCallId: string; inputTextDelta: string }
 	| { type: 'tool-input-available'; toolCallId: string; toolName: string; input: unknown }
+	| { type: 'tool-input-error'; toolCallId: string; toolName: string; errorText: string }
 	| { type: 'tool-output-available'; toolCallId: string; output: unknown }
 	| { type: 'tool-output-error'; toolCallId: string; errorText: string }
 	| { type: 'finish' }
 	| { type: string; [key: string]: unknown };
+
+type WritePreview = {
+	scan: ToolInputScan;
+	path?: string;
+	pending: string;
+	full: string;
+	announced: boolean;
+};
+
+type LiveTools = {
+	names: Map<string, string>;
+	inputs: Map<string, Record<string, unknown>>;
+	open: Set<string>;
+	previews: Map<string, WritePreview>;
+};
+
+const WRITE_PREVIEW_FLUSH = 80;
 
 /**
  * `RpcTarget` forwarder passed to `ThinkAgent.chat()`. Think streams
@@ -85,6 +106,7 @@ class ThinkStreamForwarder extends RpcTarget {
 	constructor(
 		private readonly onChunkJson: (json: string) => void | Promise<void>,
 		private readonly onErrorCb: (message: string) => void,
+		private readonly onInterruptedCb: (message: string) => void,
 	) {
 		super();
 	}
@@ -96,7 +118,9 @@ class ThinkStreamForwarder extends RpcTarget {
 	onError(error: string): void {
 		this.onErrorCb(error);
 	}
-	onInterrupted(): void {}
+	onInterrupted(): void {
+		this.onInterruptedCb('The model stopped responding before it finished writing.');
+	}
 }
 
 /**
@@ -114,6 +138,7 @@ export class ThinkCodingBehavior
 	extends BaseCodingBehavior<ThinkState>
 	implements ICodingAgent {
 	protected static readonly PROJECT_NAME_PREFIX_MAX_LENGTH = 20;
+	private previewDeployError: string | null = null;
 
 	override getBehavior(): 'think' { return 'think'; }
 
@@ -356,8 +381,12 @@ export class ThinkCodingBehavior
 	 * SpaceDO branch and return its preview URL.
 	 */
 	async deployToSandbox(): Promise<PreviewType | null> {
+		this.previewDeployError = null;
 		const url = await this.deployCurrentBranch();
-		return url ? { previewURL: url } : null;
+		if (!url) {
+			throw new Error(this.previewDeployError || 'Failed to deploy preview');
+		}
+		return { previewURL: url };
 	}
 
 	private async getPublicOrigin(): Promise<string> {
@@ -504,9 +533,13 @@ export class ThinkCodingBehavior
 
 		const accumulated = { text: '' };
 		const seenWrittenFiles = new Set<string>();
-		const toolNames = new Map<string, string>();
-		const toolInputs = new Map<string, Record<string, unknown>>();
-
+		const tools: LiveTools = {
+			names: new Map(),
+			inputs: new Map(),
+			open: new Set(),
+			previews: new Map(),
+		};
+		let streamError: string | null = null;
 		const forwarder = new ThinkStreamForwarder(
 			(json) => {
 				let chunk: ThinkChunk;
@@ -515,12 +548,18 @@ export class ThinkCodingBehavior
 				} catch {
 					return;
 				}
-				return this.translateChunk(chunk, conversationId, accumulated, seenWrittenFiles, toolNames, toolInputs);
+				return this.translateChunk(chunk, conversationId, accumulated, seenWrittenFiles, tools);
 			},
-			(err) => this.broadcast(WebSocketMessageResponses.ERROR, { error: err }),
+			(err) => {
+				streamError = err;
+			},
+			(message) => {
+				streamError = message;
+			},
 		);
 
 		const stub = await this.getThinkStub();
+		let thrown: unknown = null;
 		try {
 			// Persisted Think config keeps the previous model and gateway URL.
 			// Push the current coordinates before every turn so an existing
@@ -528,7 +567,20 @@ export class ThinkCodingBehavior
 			await this.configureThinkAgent();
 			await stub.repairModelCredentials();
 			await stub.chat(text, forwarder);
+		} catch (error) {
+			thrown = error;
+			if (!streamError) streamError = error instanceof Error ? error.message : String(error);
 		} finally {
+			await this.salvageOpenWrites(conversationId, tools, seenWrittenFiles);
+			if (tools.open.size > 0) {
+				const reason = streamError && !isAgentDisconnectError(streamError)
+					? streamError
+					: 'The write was interrupted before the file was saved.';
+				this.failOpenTools(conversationId, tools, reason);
+			}
+			if (streamError && !isAgentDisconnectError(streamError)) {
+				this.broadcast(WebSocketMessageResponses.ERROR, { error: streamError });
+			}
 			this.broadcast(WebSocketMessageResponses.USAGE_UPDATED, {
 				message: 'Usage data updated',
 			});
@@ -546,6 +598,12 @@ export class ThinkCodingBehavior
 					isStreaming: false,
 				});
 			}
+			// Think never emitted this, so a new chat stayed in isGenerating and
+			// any file preview spinner outlived the turn.
+			this.broadcast(WebSocketMessageResponses.GENERATION_COMPLETE, {});
+		}
+		if (thrown && !(streamError && isAgentDisconnectError(streamError))) {
+			throw thrown;
 		}
 	}
 
@@ -554,8 +612,7 @@ export class ThinkCodingBehavior
 		conversationId: string,
 		accumulated: { text: string },
 		seenWrittenFiles: Set<string>,
-		toolNames: Map<string, string>,
-		toolInputs: Map<string, Record<string, unknown>>,
+		tools: LiveTools,
 	): Promise<void> {
 		switch (chunk.type) {
 			case 'text-delta': {
@@ -594,39 +651,65 @@ export class ThinkCodingBehavior
 			}
 			case 'tool-input-start': {
 				const { toolCallId, toolName } = chunk as { toolCallId: string; toolName: string };
-				toolNames.set(toolCallId, toolName);
+				tools.names.set(toolCallId, toolName);
+				tools.open.add(toolCallId);
 				this.broadcast(WebSocketMessageResponses.CONVERSATION_RESPONSE, {
 					message: '',
 					conversationId,
 					isStreaming: true,
 					tool: this.buildToolBroadcastPayload(toolName, undefined, 'start', toolCallId),
 				});
+				this.publishWritePreview(conversationId, tools, toolCallId, false);
+				return;
+			}
+			case 'tool-input-delta': {
+				const { toolCallId, inputTextDelta } = chunk as { toolCallId: string; inputTextDelta?: string };
+				if (!toolCallId || !inputTextDelta) return;
+				tools.open.add(toolCallId);
+				this.noteWriteDelta(conversationId, tools, toolCallId, inputTextDelta);
 				return;
 			}
 			case 'tool-input-available': {
 				const { toolCallId, toolName, input } = chunk as {
 					toolCallId: string; toolName: string; input: unknown;
 				};
-				toolNames.set(toolCallId, toolName);
+				tools.names.set(toolCallId, toolName);
 				const args = (input && typeof input === 'object') ? (input as Record<string, unknown>) : {};
-				toolInputs.set(toolCallId, args);
+				tools.inputs.set(toolCallId, args);
 				if (isFileWriteTool(toolName)) {
 					const filePath = pickStringField(args, 'path', 'filePath', 'file');
-					if (filePath && !seenWrittenFiles.has(filePath)) {
-						const displayPath = filePath.replace(/^\/+/, '');
-						this.broadcast(WebSocketMessageResponses.FILE_GENERATING, {
-							message: `Writing ${displayPath}`,
-							filePath: displayPath,
-							filePurpose: 'Generated by think',
-						});
+					if (filePath) {
+						const preview = this.previewFor(tools, toolCallId);
+						if (!preview.path) preview.path = filePath;
 					}
 				}
+				this.publishWritePreview(conversationId, tools, toolCallId, true);
+				return;
+			}
+			case 'tool-input-error': {
+				const errored = chunk as { toolCallId: string; toolName?: string; errorText: string; input?: unknown };
+				const { toolCallId, errorText } = errored;
+				const toolName = tools.names.get(toolCallId) || errored.toolName || 'tool';
+				const fromInput = errored.input && typeof errored.input === 'object'
+					? (errored.input as Record<string, unknown>)
+					: undefined;
+				const args = fromInput ?? tools.inputs.get(toolCallId) ?? {};
+				tools.open.delete(toolCallId);
+				this.broadcast(WebSocketMessageResponses.CONVERSATION_RESPONSE, {
+					message: '',
+					conversationId,
+					isStreaming: false,
+					tool: this.buildToolBroadcastPayload(toolName, { input: args, error: errorText || 'Invalid tool input' }, 'error', toolCallId),
+				});
+				this.abandonWritePreview(tools, toolCallId);
 				return;
 			}
 			case 'tool-output-available': {
 				const { toolCallId, output } = chunk as { toolCallId: string; output: unknown };
-				const toolName = toolNames.get(toolCallId) || 'tool';
-				const args = toolInputs.get(toolCallId) || {};
+				const toolName = tools.names.get(toolCallId) || 'tool';
+				const args = tools.inputs.get(toolCallId) || {};
+				tools.open.delete(toolCallId);
+				this.publishWritePreview(conversationId, tools, toolCallId, true);
 				this.broadcast(WebSocketMessageResponses.CONVERSATION_RESPONSE, {
 					message: '',
 					conversationId,
@@ -646,18 +729,160 @@ export class ThinkCodingBehavior
 			}
 			case 'tool-output-error': {
 				const { toolCallId, errorText } = chunk as { toolCallId: string; errorText: string };
-				const toolName = toolNames.get(toolCallId) || 'tool';
-				const args = toolInputs.get(toolCallId) || {};
+				const toolName = tools.names.get(toolCallId) || 'tool';
+				const args = tools.inputs.get(toolCallId) || {};
+				tools.open.delete(toolCallId);
 				this.broadcast(WebSocketMessageResponses.CONVERSATION_RESPONSE, {
 					message: '',
 					conversationId,
 					isStreaming: false,
 					tool: this.buildToolBroadcastPayload(toolName, { input: args, error: errorText }, 'error', toolCallId),
 				});
+				this.abandonWritePreview(tools, toolCallId);
 				return;
 			}
 			default:
 				return;
+		}
+	}
+
+	private previewFor(tools: LiveTools, toolCallId: string): WritePreview {
+		let preview = tools.previews.get(toolCallId);
+		if (!preview) {
+			preview = { scan: createToolInputScan(), pending: '', full: '', announced: false };
+			tools.previews.set(toolCallId, preview);
+		}
+		return preview;
+	}
+
+	private noteWriteDelta(conversationId: string, tools: LiveTools, toolCallId: string, delta: string): void {
+		const preview = this.previewFor(tools, toolCallId);
+		const { path, contentDelta } = pushToolInput(preview.scan, delta);
+		if (path) preview.path = path;
+		const name = (tools.names.get(toolCallId) || '').toLowerCase();
+		if ((name === '' || name === 'write') && contentDelta) {
+			preview.pending += contentDelta;
+			preview.full += contentDelta;
+		}
+		this.publishWritePreview(conversationId, tools, toolCallId, false);
+	}
+
+	/**
+	 * Show the file path on the tool row and stream `write` contents into the
+	 * editor before the argument JSON is complete.
+	 */
+	private publishWritePreview(conversationId: string, tools: LiveTools, toolCallId: string, force: boolean): void {
+		const toolName = tools.names.get(toolCallId);
+		const preview = tools.previews.get(toolCallId);
+		if (!toolName || !preview?.path) return;
+		const displayPath = preview.path.replace(/^\/+/, '');
+		if (!preview.announced && isFileWriteTool(toolName)) {
+			preview.announced = true;
+			this.broadcast(WebSocketMessageResponses.FILE_GENERATING, {
+				message: `Writing ${displayPath}`,
+				filePath: displayPath,
+				filePurpose: 'Generated by think',
+			});
+			this.broadcast(WebSocketMessageResponses.CONVERSATION_RESPONSE, {
+				message: '',
+				conversationId,
+				isStreaming: true,
+				tool: this.buildToolBroadcastPayload(toolName, { input: { path: preview.path } }, 'start', toolCallId),
+			});
+		}
+		if (toolName.toLowerCase() !== 'write') return;
+		const ready = force
+			|| preview.pending.length >= WRITE_PREVIEW_FLUSH
+			|| (preview.full.length <= WRITE_PREVIEW_FLUSH && preview.pending.length > 0);
+		if (!ready || preview.pending.length === 0) return;
+		this.broadcast(WebSocketMessageResponses.FILE_CHUNK_GENERATED, {
+			filePath: displayPath,
+			chunk: preview.pending,
+		});
+		preview.pending = '';
+	}
+
+	private abandonWritePreview(tools: LiveTools, toolCallId: string): void {
+		const preview = tools.previews.get(toolCallId);
+		const toolName = tools.names.get(toolCallId) || '';
+		if (!preview?.announced || !preview.path || toolName.toLowerCase() !== 'write') return;
+		if (preview.pending.length > 0) {
+			this.broadcast(WebSocketMessageResponses.FILE_CHUNK_GENERATED, {
+				filePath: preview.path.replace(/^\/+/, ''),
+				chunk: preview.pending,
+			});
+			preview.pending = '';
+		}
+		const displayPath = preview.path.replace(/^\/+/, '');
+		this.broadcast(WebSocketMessageResponses.FILE_GENERATED, {
+			message: `Incomplete ${displayPath}`,
+			file: {
+				filePath: displayPath,
+				fileContents: preview.full,
+				filePurpose: 'Incomplete write',
+			},
+		});
+		preview.announced = false;
+	}
+
+	/**
+	 * The model stream can die after the file text has already arrived and
+	 * before Think's write tool runs (isolate reset, SQL connection closed).
+	 * Persist that text to SpaceDO so the file exists and the row is success.
+	 */
+	private async salvageOpenWrites(
+		conversationId: string,
+		tools: LiveTools,
+		seen: Set<string>,
+	): Promise<void> {
+		for (const toolCallId of [...tools.open]) {
+			const toolName = tools.names.get(toolCallId) || '';
+			const preview = tools.previews.get(toolCallId);
+			if (toolName.toLowerCase() !== 'write' || !preview?.path || preview.full.length === 0) continue;
+			const parent = preview.path.replace(/\/[^/]+$/, '');
+			try {
+				if (parent && parent !== '/' && parent !== preview.path) {
+					await this.callSpace((space) => space.mkdir(parent, { recursive: true }));
+				}
+				await this.callSpace((space) => space.writeFile(preview.path!, preview.full));
+			} catch (error) {
+				this.logger.warn('Failed to salvage interrupted write', { path: preview.path, error });
+				continue;
+			}
+			tools.open.delete(toolCallId);
+			tools.inputs.set(toolCallId, { path: preview.path, content: preview.full });
+			this.broadcast(WebSocketMessageResponses.CONVERSATION_RESPONSE, {
+				message: '',
+				conversationId,
+				isStreaming: false,
+				tool: this.buildToolBroadcastPayload(
+					toolName,
+					{ input: { path: preview.path }, output: `Saved ${preview.path}` },
+					'success',
+					toolCallId,
+				),
+			});
+			try {
+				await this.maybeMirrorFile(toolName, { path: preview.path, content: preview.full }, seen);
+			} catch (error) {
+				this.logger.warn('Failed to mirror salvaged write', { path: preview.path, error });
+			}
+		}
+	}
+
+	private failOpenTools(conversationId: string, tools: LiveTools, reason: string): void {
+		for (const toolCallId of [...tools.open]) {
+			const toolName = tools.names.get(toolCallId) || 'tool';
+			const preview = tools.previews.get(toolCallId);
+			const args = tools.inputs.get(toolCallId) ?? (preview?.path ? { path: preview.path } : {});
+			tools.open.delete(toolCallId);
+			this.broadcast(WebSocketMessageResponses.CONVERSATION_RESPONSE, {
+				message: '',
+				conversationId,
+				isStreaming: false,
+				tool: this.buildToolBroadcastPayload(toolName, { input: args, error: reason }, 'error', toolCallId),
+			});
+			this.abandonWritePreview(tools, toolCallId);
 		}
 	}
 
@@ -884,6 +1109,7 @@ export class ThinkCodingBehavior
 			// a syntax error in the generated code) instead of a broken preview.
 			if (result?.error) {
 				const message = result.details ? `${result.error}: ${result.details}` : result.error;
+				this.previewDeployError = message;
 				this.logger.warn('SpaceDO.deploy reported a build failure', { branch, error: message });
 				this.broadcast(WebSocketMessageResponses.DEPLOYMENT_FAILED, { error: message });
 				return null;
@@ -897,10 +1123,25 @@ export class ThinkCodingBehavior
 			this.broadcast(WebSocketMessageResponses.DEPLOYMENT_COMPLETED, { previewURL: url });
 			return url;
 		} catch (e) {
+			// SpaceDO restarts itself after a successful deploy. If that reset
+			// still cancels this RPC, the deployment is already stored — return
+			// the preview URL instead of reporting a failure.
+			if (isPostDeployRestartError(e)) {
+				try {
+					if (!this.state.lastDeployedCommit) {
+						this.setState({ ...this.state, lastDeployedCommit: 'deployed' });
+					}
+					const url = await this.getBrowserPreviewURL();
+					this.broadcast(WebSocketMessageResponses.DEPLOYMENT_COMPLETED, { previewURL: url });
+					return url;
+				} catch (previewError) {
+					this.logger.warn('Preview URL after SpaceDO restart failed', previewError);
+				}
+			}
+			const message = e instanceof Error ? e.message : String(e);
+			this.previewDeployError = message;
 			this.logger.warn('SpaceDO.deploy failed', e);
-			this.broadcast(WebSocketMessageResponses.DEPLOYMENT_FAILED, {
-				error: e instanceof Error ? e.message : String(e),
-			});
+			this.broadcast(WebSocketMessageResponses.DEPLOYMENT_FAILED, { error: message });
 			return null;
 		}
 	}

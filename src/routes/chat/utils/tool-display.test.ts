@@ -53,6 +53,19 @@ describe('getToolSummary', () => {
 		).toBe('Failed to edit src/foo.ts');
 	});
 
+	it('shows a short write error on the row', () => {
+		expect(
+			getToolSummary(
+				event({
+					name: 'write',
+					status: 'error',
+					args: { path: '/public/styles.css' },
+					result: 'The file contents were cut off before they were saved.',
+				}),
+			),
+		).toBe('Failed to write /public/styles.css — The file contents were cut off before they were saved.');
+	});
+
 	it('handles missing args', () => {
 		expect(getToolSummary(event({ name: 'read', status: 'start' }))).toBe(
 			'Reading…',

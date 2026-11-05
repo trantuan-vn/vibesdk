@@ -547,10 +547,23 @@ export class SpaceDO extends DurableObject<Env> {
 
     if (!data.error) {
       await this.backend.push(branch)
-      setTimeout(() => {
-        const ctx = this.ctx as unknown as { abort: (reason?: string) => void }
-        ctx.abort("Generated app deployment updated")
-      }, 0)
+      // Restart the supervisor so an active Facet drops the previous bundle.
+      // abort() resets the DO immediately. Doing that on a 0ms timer races the
+      // RPC return: the caller then sees a failed preview even though the
+      // deployment row was already saved. Wait until this result can flush.
+      this.ctx.waitUntil(new Promise<void>((resolve) => {
+        setTimeout(() => {
+          const state = this.ctx as unknown as {
+            abort: (reason?: string, options?: { retryAlarm?: boolean }) => void
+          }
+          try {
+            state.abort("Generated app deployment updated", { retryAlarm: false })
+          } catch {
+            try { state.abort("Generated app deployment updated") } catch { /* isolate already resetting */ }
+          }
+          resolve()
+        }, 250)
+      }))
     }
 
     return data

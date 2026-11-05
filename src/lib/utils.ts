@@ -5,6 +5,17 @@ export function getPreviewUrl(previewURL?: string, tunnelURL?: string): string {
     return previewURL || tunnelURL || '';
 }
 
+/** True for a SpaceDO preview (`/space/:name/preview/:branch/`), not a production worker URL. */
+export function isSpacePreviewUrl(url: string | null | undefined): boolean {
+    if (!url) return false;
+    try {
+        const pathname = new URL(url, 'http://localhost').pathname;
+        return /\/space\/[^/]+\/preview\/[^/]+\/?/.test(pathname);
+    } catch {
+        return false;
+    }
+}
+
 export function capitalizeFirstLetter(str: string) {
   if (typeof str !== 'string' || str.length === 0) {
     return str; // Handle non-string input or empty string

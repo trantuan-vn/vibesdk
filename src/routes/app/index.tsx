@@ -16,7 +16,7 @@ import { useAuth } from '@/contexts/auth-context';
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { useAuthGuard } from '@/hooks/useAuthGuard';
 import { ApiError } from '@/lib/api-client';
-import { capitalizeFirstLetter, getPreviewUrl } from '@/lib/utils';
+import { capitalizeFirstLetter, getPreviewUrl, isSpacePreviewUrl } from '@/lib/utils';
 import { getFileType } from '@/utils/string';
 import {
 	Badge,
@@ -107,12 +107,14 @@ export default function AppView() {
 	const previewIframeRef = useRef<HTMLIFrameElement>(null);
 	const autoDeployAppIdRef = useRef<string | undefined>(undefined);
 	const [thinkPreviewUrl, setThinkPreviewUrl] = useState<string>();
+	const [previewError, setPreviewError] = useState<string>();
 
 	// Route reuses this component across /app/:id — clear deploy UI on switch
 	useEffect(() => {
 		setDeploymentProgress('');
 		autoDeployAppIdRef.current = undefined;
 		setThinkPreviewUrl(undefined);
+		setPreviewError(undefined);
 		setActiveTab('preview');
 		setActiveFilePath(undefined);
 	}, [id]);
@@ -340,17 +342,21 @@ export default function AppView() {
 	const isSignedIn = !!user;
 	const isOwner = !!app && app.userId === user?.id;
 	const isThink = app?.behaviorType === 'think';
+	const cachedSpacePreview = isSpacePreviewUrl(app?.previewUrl)
+		? app?.previewUrl || ''
+		: '';
 	// Think apps auto-load their live SpaceDO preview for signed-in viewers
 	// (see the effect below). Anonymous viewers can't hit the auth-gated deploy
 	// endpoint, so they fall back to the same manual affordance as non-Think apps.
-	const isAutoLoadingPreview = isThink && !!user;
+	const isAutoLoadingPreview =
+		isThink && !!user && !thinkPreviewUrl && !cachedSpacePreview && !previewError;
 	// Think prefers its live preview over the production deployment link. For
 	// signed-in viewers we withhold the deployed link until the preview resolves
 	// so the preview always wins; anonymous viewers fall back to it.
 	const appUrl = isThink
 		? user
-			? thinkPreviewUrl || ''
-			: app?.cloudflareUrl || app?.previewUrl || ''
+			? thinkPreviewUrl || cachedSpacePreview || ''
+			: cachedSpacePreview || app?.cloudflareUrl || app?.previewUrl || ''
 		: ownerPreviewUrl || app?.cloudflareUrl || app?.previewUrl || '';
 	const promptText = app?.agentSummary?.query || app?.originalPrompt || '';
 
@@ -359,8 +365,39 @@ export default function AppView() {
 		copyUrl(appUrl);
 	};
 
+	const loadThinkPreview = useCallback(async () => {
+		setPreviewError(undefined);
+		setDeploymentProgress('Loading preview...');
+		try {
+			const data = await deployPreview();
+			const url = getPreviewUrl(data.previewURL, data.tunnelURL);
+			if (!url) {
+				throw new Error('Preview URL was empty');
+			}
+			setThinkPreviewUrl(url);
+			setDeploymentProgress('');
+		} catch (error) {
+			console.error('Error loading Think preview:', error);
+			const message =
+				error instanceof Error && error.message
+					? error.message
+					: 'Failed to load preview';
+			setPreviewError(message);
+			setDeploymentProgress(message);
+			toast.add({
+				title: 'Failed to load preview',
+				description: message,
+				variant: 'error',
+			});
+		}
+	}, [deployPreview, toast]);
+
 	const handlePreviewDeploy = async () => {
 		if (!app || isDeploying) return;
+		if (isThink && user) {
+			await loadThinkPreview();
+			return;
+		}
 
 		try {
 			setDeploymentProgress('Connecting to agent...');
@@ -370,9 +407,14 @@ export default function AppView() {
 			}
 		} catch (error) {
 			console.error('Error starting deployment:', error);
-			setDeploymentProgress('Failed to start deployment');
+			const message =
+				error instanceof Error && error.message
+					? error.message
+					: 'Failed to start deployment';
+			setDeploymentProgress(message);
 			toast.add({
 				title: 'Failed to start deployment',
+				description: message,
 				variant: 'error',
 			});
 		}
@@ -382,33 +424,28 @@ export default function AppView() {
 	// "Deploy". Gated to authenticated users: the preview endpoint requires
 	// auth (and applies per-user rate limiting), so anonymous visitors would
 	// only get a 401. They still see the manual deploy affordance below.
+	// Skip the redeploy when a SpaceDO preview URL is already known.
 	useEffect(() => {
 		if (
 			!app ||
 			!user ||
 			app.behaviorType !== 'think' ||
 			thinkPreviewUrl ||
+			cachedSpacePreview ||
 			autoDeployAppIdRef.current === app.id
 		) {
 			return;
 		}
 
 		autoDeployAppIdRef.current = app.id;
-		setDeploymentProgress('Loading preview...');
-		void deployPreview()
-			.then((data) => {
-				const url = getPreviewUrl(data.previewURL, data.tunnelURL);
-				if (url) setThinkPreviewUrl(url);
-			})
-			.catch((error) => {
-				console.error('Error loading Think preview:', error);
-				setDeploymentProgress('Failed to load preview');
-				toast.add({
-					title: 'Failed to load preview',
-					variant: 'error',
-				});
-			});
-	}, [app, thinkPreviewUrl, deployPreview, toast, user]);
+		void loadThinkPreview();
+	}, [
+		app,
+		cachedSpacePreview,
+		loadThinkPreview,
+		thinkPreviewUrl,
+		user,
+	]);
 
 	const handleToggleVisibility = useCallback(async () => {
 		if (!app || !user || !isOwner) {
@@ -823,16 +860,20 @@ export default function AppView() {
 									<div className="relative z-10 text-center p-8 grid gap-4 max-w-md">
 										<div className="grid gap-1.5">
 											<h3 className="text-xl font-semibold">
-												{isAutoLoadingPreview
-													? 'Loading preview'
-													: 'Run app'}
+												{previewError
+													? 'Preview unavailable'
+													: isAutoLoadingPreview
+														? 'Loading preview'
+														: 'Run app'}
 											</h3>
 											<p className="text-kumo-subtle text-sm">
-												{isAutoLoadingPreview
-													? 'Preparing this app preview.'
-													: 'Deploy a preview to see this app live.'}
+												{previewError
+													? previewError
+													: isAutoLoadingPreview
+														? 'Preparing this app preview.'
+														: 'Deploy a preview to see this app live.'}
 											</p>
-											{deploymentProgress && (
+											{deploymentProgress && !previewError && (
 												<p className="text-sm text-kumo-subtle">
 													{deploymentProgress}
 												</p>
@@ -855,7 +896,9 @@ export default function AppView() {
 												>
 													{isDeploying
 														? 'Deploying...'
-														: 'Deploy for preview'}
+														: previewError
+															? 'Try again'
+															: 'Deploy for preview'}
 												</Button>
 											</div>
 										)}

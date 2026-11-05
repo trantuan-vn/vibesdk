@@ -48,7 +48,25 @@ function isFileInfo(value: FileInfo | null): value is FileInfo {
  */
 export function isDurableObjectResetError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
-	return /reset because its code was updated|Durable Object .*(reset|restarted)/i.test(message);
+	// A successful SpaceDO deploy restarts itself with this reason. That is not
+	// a failed call to retry — retrying would deploy and abort again.
+	if (message.includes('Generated app deployment updated')) return false;
+	return /reset because its code was updated|Durable Object .*(reset|restarted)|no longer active|SQL query failed/i.test(message);
+}
+
+/** Stream died because the agent isolate was reset or the stall watchdog aborted it. */
+export function isAgentDisconnectError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return isDurableObjectResetError(message) || /stopped responding|chat stream stalled/i.test(message);
+}
+
+/** True when SpaceDO aborted itself after a deploy that already committed. */
+export function isPostDeployRestartError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	const cause = error instanceof Error && error.cause != null
+		? (error.cause instanceof Error ? error.cause.message : String(error.cause))
+		: '';
+	return `${message}\n${cause}`.includes('Generated app deployment updated');
 }
 
 /**

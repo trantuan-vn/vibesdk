@@ -26,6 +26,7 @@ import { RateLimitService } from '../../services/rate-limit/rateLimits';
 import { hasCloudflareConfigured } from '../../services/rate-limit/usageChecker';
 import type { RateLimitSettings } from '../../services/rate-limit/config';
 import { THINK_MODEL_CONFIG } from './model-config';
+import { ensureToolCallFunction, rewriteToolCallSse, type ToolArgumentState } from './tool-call-delta';
 import { readCloudflareApiToken } from '../../utils/binding-secret';
 
 /**
@@ -103,6 +104,7 @@ function patchToolCallChunk(
 			if (call && typeof call === 'object' && (call as { index?: unknown }).index == null) {
 				(call as { index: number }).index = i;
 			}
+			ensureToolCallFunction(call);
 			const id = (call as { id?: unknown })?.id;
 			const sig = getThoughtSignature(call);
 			if (typeof id === 'string' && sig) onSignature(id, sig);
@@ -123,30 +125,21 @@ function fixToolCallStream(
 	const decoder = new TextDecoder();
 	const encoder = new TextEncoder();
 	let buffer = '';
-	const transformLine = (line: string): string => {
-		const trimmed = line.trimStart();
-		if (!trimmed.startsWith('data:')) return line;
-		const payload = trimmed.slice(5).trim();
-		if (!payload || payload === '[DONE]') return line;
-		try {
-			const json = JSON.parse(payload) as Record<string, unknown>;
-			return `data: ${JSON.stringify(patchToolCallChunk(json, onSignature))}`;
-		} catch {
-			return line;
-		}
+	const args: ToolArgumentState = new Map();
+	const patch = (json: Record<string, unknown>): void => {
+		patchToolCallChunk(json, onSignature);
 	};
 	return body.pipeThrough(
 		new TransformStream<Uint8Array, Uint8Array>({
 			transform(chunk, controller) {
 				buffer += decoder.decode(chunk, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() ?? '';
-				for (const line of lines) {
-					controller.enqueue(encoder.encode(`${transformLine(line)}\n`));
-				}
+				const rewritten = rewriteToolCallSse(buffer, args, false, patch);
+				buffer = rewritten.rest;
+				if (rewritten.out) controller.enqueue(encoder.encode(rewritten.out));
 			},
 			flush(controller) {
-				if (buffer) controller.enqueue(encoder.encode(transformLine(buffer)));
+				const rewritten = rewriteToolCallSse(buffer, args, true, patch);
+				if (rewritten.out) controller.enqueue(encoder.encode(rewritten.out));
 			},
 		}),
 	);
@@ -163,6 +156,13 @@ export class ThinkAgent extends Think<Env> {
 	override maxSteps = 25;
 	/** SpaceDO has no shell; expose only the explicit file tools. */
 	override workspaceBash = false;
+	/**
+	 * Backstop for a provider socket that never closes. The gap includes tool
+	 * execution, and aborting a live write has been killing the Durable Object
+	 * mid-SQL ("instance is no longer active") and cutting the file off. Keep
+	 * this well above a full CSS/JS write.
+	 */
+	override chatStreamStallTimeoutMs = 600_000;
 
 	/**
 	 * Gemini thought signatures harvested from streamed tool calls, keyed by
@@ -332,7 +332,7 @@ export class ThinkAgent extends Think<Env> {
 			originalMessageCount: ctx.messages.length,
 			selectedMessageCount: messages.length,
 		});
-		return { messages };
+		return { messages, maxOutputTokens: 8192 };
 	}
 
 	override getSkills(): SkillSource[] {

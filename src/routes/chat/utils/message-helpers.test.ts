@@ -55,6 +55,17 @@ describe('message parts appenders', () => {
 		expect(tools[1].event).toMatchObject({ id: 'b', status: 'start' });
 	});
 
+	it('updates a running tool in place when the same id starts again with args', () => {
+		let messages: ChatMessage[] = [];
+		messages = appendToolEvent(messages, CONV, { name: 'write', status: 'start', id: 't1' });
+		messages = appendToolEvent(messages, CONV, { name: 'write', status: 'start', id: 't1', args: { path: 'src/app.js' } });
+
+		const msg = messages.find((m) => m.conversationId === CONV)!;
+		const tools = (msg.parts ?? []).filter((p) => p.type === 'tool') as Extract<MessagePart, { type: 'tool' }>[];
+		expect(tools).toHaveLength(1);
+		expect(tools[0].event).toMatchObject({ id: 't1', status: 'start', args: { path: 'src/app.js' } });
+	});
+
 	it('setAssistantText preserves streamed interleaving (finalize no-op)', () => {
 		let messages: ChatMessage[] = [];
 		messages = appendTextDelta(messages, CONV, 'Part A ');

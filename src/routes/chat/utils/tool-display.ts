@@ -211,12 +211,21 @@ function detailFor(event: ToolEvent): string | undefined {
  * Plain-English one-line summary for a tool event.
  * e.g. "Reading src/App.tsx…", "Read src/App.tsx", "Failed to read src/App.tsx"
  */
+function shortError(result: string | undefined): string | undefined {
+	if (!result) return undefined;
+	const line = result.split('\n')[0]?.trim();
+	if (!line || line.startsWith('{') || line.startsWith('[')) return undefined;
+	return line.length > 90 ? `${line.slice(0, 89)}…` : line;
+}
+
 export function getToolSummary(event: ToolEvent): string {
 	const verb = verbFor(event.name, event.status);
 	const detail = detailFor(event);
 	const ellipsis = event.status === 'start' ? '…' : '';
-	if (!detail) return `${verb}${ellipsis}`;
-	return `${verb} ${detail}${ellipsis}`;
+	const head = !detail ? `${verb}${ellipsis}` : `${verb} ${detail}${ellipsis}`;
+	if (event.status !== 'error') return head;
+	const reason = shortError(event.result);
+	return reason ? `${head} — ${reason}` : head;
 }
 
 /** Noun used when collapsing multiple consecutive tools of the same name. */

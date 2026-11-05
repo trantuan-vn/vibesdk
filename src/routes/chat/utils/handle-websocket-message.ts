@@ -20,6 +20,7 @@ import {
     appendReasoningDelta,
     setAssistantText,
     appendToolEvent,
+    settleRunningTools,
     type ChatMessage,
     type MessagePart,
     type ToolEvent,
@@ -1143,6 +1144,8 @@ export function createWebSocketMessageHandler(deps: HandleMessageDeps) {
 
             case 'error': {
                 const errorData = message;
+                setIsGenerating(false);
+                setMessages(prev => settleRunningTools(prev, errorData.error || 'The step failed'));
                 
                 logger.info('🚨 Error message received:', {
                     showAsPopup: errorData.showAsPopup,

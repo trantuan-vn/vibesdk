@@ -459,7 +459,7 @@ export class CodingAgentController extends BaseController {
                 
                 // Deploy the preview
                 const preview = await agentInstance.deployToSandbox();
-                if (!preview) {
+                if (!preview?.previewURL) {
                     return CodingAgentController.createErrorResponse<AgentPreviewResponse>('Failed to deploy preview', 500);
                 }
                 this.logger.info('Preview deployed successfully', {
@@ -470,7 +470,11 @@ export class CodingAgentController extends BaseController {
                 return CodingAgentController.createSuccessResponse(preview);
             } catch (error) {
                 this.logger.error('Failed to deploy preview', { agentId, error });
-                return CodingAgentController.createErrorResponse<AgentPreviewResponse>('Failed to deploy preview', 500);
+                const detail = error instanceof Error ? error.message.trim() : '';
+                const message = detail
+                    ? detail.slice(0, 500)
+                    : 'Failed to deploy preview';
+                return CodingAgentController.createErrorResponse<AgentPreviewResponse>(message, 500);
             }
         } catch (error) {
             this.logger.error('Error deploying preview', error);

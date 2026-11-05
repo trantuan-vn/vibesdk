@@ -403,8 +403,16 @@ export class CodeGeneratorAgent extends Agent<Env, AgentState> implements AgentI
         return this.behavior.captureBrowserConsoleLogs(opts ?? {});
     }
 
-    getPreviewUrlCache(): string {
-        return ''; // Unimplemented
+    async getPreviewUrlCache(): Promise<string> {
+        if (this.state.behaviorType !== 'think' || !this.state.lastDeployedCommit) {
+            return '';
+        }
+        try {
+            return await this.behavior.getBrowserPreviewURL();
+        } catch (error) {
+            this.logger().warn('Failed to build cached think preview URL', { error });
+            return '';
+        }
     }
 
     deployToSandbox(
